@@ -312,6 +312,25 @@ impl<P: 'static + Send + Clone + Ord, M: MutexLockStrategy> TaskQueue<P, M> {
         self.wake_listeners();
         TaskHandle { state: self.state.clone(), task: tta.into(), work: twa.into() }
     }
+
+    pub fn spawn_join<T: Task>(&self, task: T, priority: P) -> T::Output {
+        let mut tqs = M::lock(&self.state.mutex).unwrap();
+        
+        let ta = Arc::new(task);
+        let tta: Arc<dyn Task<Output = T::Output>> = Arc::<T>::clone(&ta);
+        let twa: Arc<dyn WorkCollection> = Arc::<T>::clone(&ta);
+
+        let work_unit = ta.next_unit();
+        
+        tqs.push_task(twa.clone().into(), priority);
+        self.wake_listeners();
+        
+        if let Some(unit) = work_unit {
+            unit.execute();
+        }
+
+        TaskHandle { state: self.state.clone(), task: tta.into(), work: twa.into() }.join()
+    }
 }
 
 impl<P: 'static + Send + Clone + Ord, M: MutexLockStrategy> Default for TaskQueue<P, M> {
