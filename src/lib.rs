@@ -2,7 +2,7 @@ use std::marker::PhantomData;
 use std::sync::*;
 use std::ops::*;
 
-pub trait MutexLockStrategy: Clone {
+pub trait MutexLockStrategy: 'static + Default + Clone + Send + Sync {
     fn lock<T>(mutex: &Mutex<T>) -> LockResult<MutexGuard<'_, T>> {
         mutex.lock()
     }
@@ -14,9 +14,13 @@ pub trait MutexLockStrategy: Clone {
     fn write<T>(rw: &RwLock<T>) -> LockResult<RwLockWriteGuard<'_, T>> {
         rw.write()
     }
+
+    fn wait<'a, T>(condvar: &Condvar, guard: MutexGuard<'a, T>) -> LockResult<MutexGuard<'a, T>> {
+        condvar.wait(guard)
+    }
 }
 
-#[derive(Clone)]
+#[derive(Default, Clone)]
 pub struct DefaultMutexLockStrategy {}
 impl MutexLockStrategy for DefaultMutexLockStrategy {}
 
@@ -103,13 +107,13 @@ pub struct TaskPoolStack<M: MutexLockStrategy = DefaultMutexLockStrategy> {
 }
 
 impl<M: MutexLockStrategy> TaskPoolStack<M> {
-    pub fn new(pool: TaskPool) -> Self {
+    pub fn new(pool: TaskPool<M>) -> Self {
         let providers = Arc::new(Mutex::new(vec!(pool.work_provider())));
 
         Self { pool, providers }
     }
 
-    pub fn push(&self, wp: impl WorkProvider) -> TaskPoolStackGuard {
+    pub fn push(&self, wp: impl WorkProvider) -> TaskPoolStackGuard<M> {
         let provider = Arc::new(wp);
         let mut provs = M::lock(&self.providers).unwrap();
         provs.push(provider.clone());
@@ -124,17 +128,17 @@ impl<M: MutexLockStrategy> TaskPoolStack<M> {
     }
 }
 
-pub struct TaskPoolStackGuard<'a> {
-    stack: &'a TaskPoolStack
+pub struct TaskPoolStackGuard<'a, M: MutexLockStrategy> {
+    stack: &'a TaskPoolStack<M>
 }
 
-impl<'a> TaskPoolStackGuard<'a> {
+impl<'a, M: MutexLockStrategy> TaskPoolStackGuard<'a, M> {
     pub fn forget(self) {
         let _ = std::mem::ManuallyDrop::new(self);
     }
 }
 
-impl<'a> Drop for TaskPoolStackGuard<'a> {
+impl<'a, M: MutexLockStrategy> Drop for TaskPoolStackGuard<'a, M> {
     fn drop(&mut self) {
         self.stack.pop();
     }
@@ -142,12 +146,13 @@ impl<'a> Drop for TaskPoolStackGuard<'a> {
 
 #[derive(Default)]
 pub struct EmptyWorkProvider<M: MutexLockStrategy = DefaultMutexLockStrategy> {
-    state: CondMutex<()>
+    state: CondMutex<()>,
+    data: PhantomData<M>
 }
 
 impl<M: MutexLockStrategy> WorkProvider for EmptyWorkProvider<M> {
     fn next_unit(&self) -> Option<Box<dyn WorkUnit>> {
-        let _ = self.state.condvar.wait(M::lock(&self.state.mutex).unwrap()).unwrap();
+        let _ = M::wait(&self.state.condvar, M::lock(&self.state.mutex).unwrap()).unwrap();
         None
     }
 
@@ -185,7 +190,8 @@ impl<I: 'static + Send, R: 'static + Send> Task for MapTask<I, R> {
 pub struct FoldTask<I: 'static + Send, R, O: 'static + Send, M: MutexLockStrategy = DefaultMutexLockStrategy> {
     func: Arc<dyn Fn(I) -> R + Send + Sync>,
     fold: Arc<dyn Fn(&mut O, R) + Send + Sync>,
-    state: Arc<CondMutex<FlatmapTaskState<I, O>>>
+    state: Arc<CondMutex<FlatmapTaskState<I, O>>>,
+    data: PhantomData<M>
 }
 
 impl<I: Send, R, O: Send, M: MutexLockStrategy> FoldTask<I, R, O, M> {
@@ -197,7 +203,7 @@ impl<I: Send, R, O: Send, M: MutexLockStrategy> FoldTask<I, R, O, M> {
         let input = input.into_iter();
         let st = FlatmapTaskState { input, output: Some(default), left };
         let state = Arc::new(CondMutex::new(st));
-        Self { func, fold, state }
+        Self { func, fold, state, data: PhantomData::default() }
     }
 }
 
@@ -207,7 +213,7 @@ impl<I: 'static + Send, R: 'static, O: 'static + Send, M: MutexLockStrategy> Wor
         let func = self.func.clone();
         let fold = self.fold.clone();
 
-        let mut fts = M::lock(&self.state.mutex.lock).unwrap();
+        let mut fts = M::lock(&self.state.mutex).unwrap();
         fts.input.next().map(|x| Box::new(ClosureWorkUnit { func: move || {
             let res = func(x);
             let mut g = M::lock(&ms.mutex).unwrap();
@@ -229,7 +235,7 @@ impl<I: 'static + Send, R: 'static, O: 'static + Send, M: MutexLockStrategy> Tas
     fn wait(&self) -> Self::Output {
         let mut fts = M::lock(&self.state.mutex).unwrap();
         while fts.left != 0 {
-            fts = self.state.condvar.wait(fts).unwrap();
+            fts = M::wait(&self.state.condvar, fts).unwrap();
         }
 
         std::mem::replace(&mut fts.output, None).unwrap()
@@ -264,13 +270,13 @@ pub trait WorkCollection: 'static + Send + Sync {
 }
 
 #[derive(Default, Clone)]
-pub struct TaskQueue {
-    state: Arc<CondMutex<TaskQueueState>>
+pub struct TaskQueue<M: MutexLockStrategy = DefaultMutexLockStrategy> {
+    state: Arc<CondMutex<TaskQueueState<M>>>
 }
 
-impl TaskQueue {
-    pub fn spawn<T: Task>(&self, task: T, priority: i32) -> TaskHandle<T::Output> {
-        let mut tqs = self.state.mutex.lock().unwrap();
+impl<M: MutexLockStrategy> TaskQueue<M> {
+    pub fn spawn<T: Task>(&self, task: T, priority: i32) -> TaskHandle<T::Output, M> {
+        let mut tqs = M::lock(&self.state.mutex).unwrap();
         
         let ta = Arc::new(task);
         let tta: Arc<dyn Task<Output = T::Output>> = Arc::<T>::clone(&ta);
@@ -282,13 +288,13 @@ impl TaskQueue {
     }
 }
 
-impl WorkProvider for TaskQueue {
+impl<M: MutexLockStrategy> WorkProvider for TaskQueue<M> {
     fn next_unit(&self) -> Option<Box<dyn WorkUnit>> {
         let mut tqs = self.state.mutex.lock().unwrap();
         let res = tqs.next_unit();
 
         if res.is_none() {
-            let _ = self.state.condvar.wait(tqs).unwrap();
+            let _ = M::wait(&self.state.condvar, tqs).unwrap();
         }
 
         res
@@ -300,12 +306,13 @@ impl WorkProvider for TaskQueue {
 }
 
 #[derive(Default)]
-struct TaskQueueState {
+struct TaskQueueState<M: MutexLockStrategy> {
     current: Option<WorkReference<dyn WorkCollection>>,
-    queue: priority_queue::PriorityQueue<WorkReference<dyn WorkCollection>, i32>
+    queue: priority_queue::PriorityQueue<WorkReference<dyn WorkCollection>, i32>,
+    data: PhantomData<M>
 }
 
-impl TaskQueueState {
+impl<M: MutexLockStrategy> TaskQueueState<M> {
     pub fn priority(&self, task: &WorkReference<dyn WorkCollection>) -> Option<i32> {
         self.queue.get_priority(&task).map(|x| *x)
     }
@@ -382,13 +389,13 @@ impl<T: ?Sized> PartialEq for WorkReference<T> {
 impl<T: ?Sized> Eq for WorkReference<T> {}
 
 
-pub struct TaskHandle<O> {
-    state: Arc<CondMutex<TaskQueueState>>,
+pub struct TaskHandle<O, M: MutexLockStrategy> {
+    state: Arc<CondMutex<TaskQueueState<M>>>,
     task: WorkReference<dyn Task<Output = O>>,
     work: WorkReference<dyn WorkCollection>
 }
 
-impl<O: 'static> TaskHandle<O> {
+impl<O: 'static, M: MutexLockStrategy> TaskHandle<O, M> {
     pub fn priority(&self) -> Option<i32> {
         self.state.mutex.lock().unwrap().priority(&self.work)
     }
@@ -438,7 +445,7 @@ mod tests {
     #[test]
     fn test_parallel_multiply() {
         let pool: TaskPool = TaskPool::new(8);
-        let queue = TaskQueue::default();
+        let queue: TaskQueue = TaskQueue::default();
         pool.set_work_provider(queue.clone());
 
         let mul = 2;
@@ -455,7 +462,7 @@ mod tests {
     #[test]
     fn test_join() {
         let pool: TaskPool = TaskPool::new(0);
-        let queue = TaskQueue::default();
+        let queue: TaskQueue = TaskQueue::default();
         pool.set_work_provider(queue.clone());
 
         let mul = 2;
@@ -471,7 +478,7 @@ mod tests {
     #[test]
     fn test_threads() {
         let pool: TaskPool = TaskPool::new(8);
-        let queue = TaskQueue::default();
+        let queue: TaskQueue = TaskQueue::default();
         pool.set_work_provider(queue.clone());
 
         let mul = 2;
