@@ -295,7 +295,7 @@ pub trait WorkCollection: 'static + Send + Sync {
     fn next_unit(&self) -> Option<Box<dyn WorkUnit>>;
 }
 
-#[derive(Default, Clone)]
+#[derive(Clone)]
 pub struct TaskQueue<P: Send + Clone + Ord = i32, M: MutexLockStrategy = DefaultMutexLockStrategy> {
     state: Arc<CondMutex<TaskQueueState<P, M>>>
 }
@@ -311,6 +311,13 @@ impl<P: 'static + Send + Clone + Ord, M: MutexLockStrategy> TaskQueue<P, M> {
         tqs.push_task(twa.clone().into(), priority);
         self.wake_listeners();
         TaskHandle { state: self.state.clone(), task: tta.into(), work: twa.into() }
+    }
+}
+
+impl<P: 'static + Send + Clone + Ord, M: MutexLockStrategy> Default for TaskQueue<P, M> {
+    fn default() -> Self {
+        let state = Arc::new(CondMutex::new(TaskQueueState::default()));
+        Self { state }
     }
 }
 
