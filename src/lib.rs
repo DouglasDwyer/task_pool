@@ -331,7 +331,6 @@ impl<P: 'static + Send + Clone + Ord, M: MutexLockStrategy> WorkProvider for Tas
     }
 }
 
-#[derive(Default)]
 struct TaskQueueState<P: Ord + Clone, M: MutexLockStrategy> {
     current: Option<WorkReference<dyn WorkCollection>>,
     queue: priority_queue::PriorityQueue<WorkReference<dyn WorkCollection>, P>,
@@ -373,6 +372,15 @@ impl<P: Ord + Clone, M: MutexLockStrategy> TaskQueueState<P, M> {
 
     pub fn push_task(&mut self, task: WorkReference<dyn WorkCollection>, priority: P) {
         let _ = self.queue.push(task, priority);
+    }
+}
+
+impl<P: Ord + Clone, M: MutexLockStrategy> Default for TaskQueueState<P, M> {
+    fn default() -> Self {
+        let current = None;
+        let queue = priority_queue::PriorityQueue::new();
+        let data = PhantomData::default();
+        Self { current, queue, data }
     }
 }
 
