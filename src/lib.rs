@@ -449,7 +449,7 @@ impl<T: ?Sized> PartialEq for WorkReference<T> {
 impl<T: ?Sized> Eq for WorkReference<T> {}
 
 
-pub struct TaskHandle<O, P: Ord + Clone, M: MutexLockStrategy> {
+pub struct TaskHandle<O, P: Ord + Clone, M: MutexLockStrategy = DefaultMutexLockStrategy> {
     state: Arc<CondMutex<TaskQueueState<P, M>>>,
     task: WorkReference<dyn Task<Output = O>>,
     work: WorkReference<dyn WorkCollection>
