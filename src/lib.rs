@@ -270,12 +270,12 @@ pub trait WorkCollection: 'static + Send + Sync {
 }
 
 #[derive(Default, Clone)]
-pub struct TaskQueue<M: MutexLockStrategy = DefaultMutexLockStrategy> {
-    state: Arc<CondMutex<TaskQueueState<M>>>
+pub struct TaskQueue<P: Send + Clone + Ord = i32, M: MutexLockStrategy = DefaultMutexLockStrategy> {
+    state: Arc<CondMutex<TaskQueueState<P, M>>>
 }
 
-impl<M: MutexLockStrategy> TaskQueue<M> {
-    pub fn spawn<T: Task>(&self, task: T, priority: i32) -> TaskHandle<T::Output, M> {
+impl<P: 'static + Send + Clone + Ord, M: MutexLockStrategy> TaskQueue<P, M> {
+    pub fn spawn<T: Task>(&self, task: T, priority: P) -> TaskHandle<T::Output, P, M> {
         let mut tqs = M::lock(&self.state.mutex).unwrap();
         
         let ta = Arc::new(task);
@@ -288,7 +288,7 @@ impl<M: MutexLockStrategy> TaskQueue<M> {
     }
 }
 
-impl<M: MutexLockStrategy> WorkProvider for TaskQueue<M> {
+impl<P: 'static + Send + Clone + Ord, M: MutexLockStrategy> WorkProvider for TaskQueue<P, M> {
     fn next_unit(&self) -> Option<Box<dyn WorkUnit>> {
         let mut tqs = self.state.mutex.lock().unwrap();
         let res = tqs.next_unit();
@@ -306,18 +306,18 @@ impl<M: MutexLockStrategy> WorkProvider for TaskQueue<M> {
 }
 
 #[derive(Default)]
-struct TaskQueueState<M: MutexLockStrategy> {
+struct TaskQueueState<P: Ord + Clone, M: MutexLockStrategy> {
     current: Option<WorkReference<dyn WorkCollection>>,
-    queue: priority_queue::PriorityQueue<WorkReference<dyn WorkCollection>, i32>,
+    queue: priority_queue::PriorityQueue<WorkReference<dyn WorkCollection>, P>,
     data: PhantomData<M>
 }
 
-impl<M: MutexLockStrategy> TaskQueueState<M> {
-    pub fn priority(&self, task: &WorkReference<dyn WorkCollection>) -> Option<i32> {
-        self.queue.get_priority(&task).map(|x| *x)
+impl<P: Ord + Clone, M: MutexLockStrategy> TaskQueueState<P, M> {
+    pub fn priority(&self, task: &WorkReference<dyn WorkCollection>) -> Option<P> {
+        self.queue.get_priority(&task).map(|x| x.clone())
     }
 
-    pub fn set_priority(&mut self, task: &WorkReference<dyn WorkCollection>, priority: i32) {
+    pub fn set_priority(&mut self, task: &WorkReference<dyn WorkCollection>, priority: P) {
         let _ = self.queue.change_priority(&task, priority);
     }
 
@@ -345,7 +345,7 @@ impl<M: MutexLockStrategy> TaskQueueState<M> {
         return None;
     }
 
-    pub fn push_task(&mut self, task: WorkReference<dyn WorkCollection>, priority: i32) {
+    pub fn push_task(&mut self, task: WorkReference<dyn WorkCollection>, priority: P) {
         let _ = self.queue.push(task, priority);
     }
 }
@@ -389,18 +389,18 @@ impl<T: ?Sized> PartialEq for WorkReference<T> {
 impl<T: ?Sized> Eq for WorkReference<T> {}
 
 
-pub struct TaskHandle<O, M: MutexLockStrategy> {
-    state: Arc<CondMutex<TaskQueueState<M>>>,
+pub struct TaskHandle<O, P: Ord + Clone, M: MutexLockStrategy> {
+    state: Arc<CondMutex<TaskQueueState<P, M>>>,
     task: WorkReference<dyn Task<Output = O>>,
     work: WorkReference<dyn WorkCollection>
 }
 
-impl<O: 'static, M: MutexLockStrategy> TaskHandle<O, M> {
-    pub fn priority(&self) -> Option<i32> {
+impl<O: 'static, P: Ord + Clone, M: MutexLockStrategy> TaskHandle<O, P, M> {
+    pub fn priority(&self) -> Option<P> {
         self.state.mutex.lock().unwrap().priority(&self.work)
     }
 
-    pub fn set_priority(&self, priority: i32) {
+    pub fn set_priority(&self, priority: P) {
         self.state.mutex.lock().unwrap().set_priority(&self.work, priority);
     }
     
