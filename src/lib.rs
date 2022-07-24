@@ -161,6 +161,32 @@ impl<M: MutexLockStrategy> WorkProvider for EmptyWorkProvider<M> {
     }
 }
 
+pub struct SingletonTask<I: 'static + Send = (), R: 'static + Send = ()>(FoldTask<I, R, Vec<R>>);
+
+impl<I: 'static + Send, R: Send> SingletonTask<I, R> {
+    pub fn new(func: impl Fn(I) -> R + Send + Sync + 'static, input: I) -> Self {
+        Self(FoldTask::new(func, |v, r| v.push(r), Vec::new(), vec!(input)))
+    }
+}
+
+impl<I: 'static + Send, R: 'static + Send> WorkCollection for SingletonTask<I, R> {
+    fn next_unit(&self) -> Option<Box<dyn WorkUnit>> {
+        self.0.next_unit()
+    }
+}
+
+impl<I: 'static + Send, R: 'static + Send> Task for SingletonTask<I, R> {
+    type Output = R;
+
+    fn complete(&self) -> bool {
+        self.0.complete()
+    }
+
+    fn wait(&self) -> Self::Output {
+        self.0.wait().pop().unwrap()
+    }
+}
+
 pub struct MapTask<I: 'static + Send, R: 'static + Send>(FoldTask<I, R, Vec<R>>);
 
 impl<I: 'static + Send, R: Send> MapTask<I, R> {
@@ -427,7 +453,7 @@ impl<O: 'static, P: Ord + Clone, M: MutexLockStrategy> TaskHandle<O, P, M> {
 }
 
 #[derive(Default)]
-pub struct CondMutex<T> {
+struct CondMutex<T> {
     pub condvar: Condvar,
     pub mutex: Mutex<T>
 }
