@@ -444,6 +444,10 @@ impl<O: 'static, P: Ord + Clone, M: MutexLockStrategy> TaskHandle<O, P, M> {
     pub fn set_priority(&self, priority: P) {
         self.state.mutex.lock().unwrap().set_priority(&self.work, priority);
     }
+
+    pub fn complete(&self) -> bool {
+        self.task.complete()
+    }
     
     pub fn result(self) -> Result<O, Self> {
         if self.task.complete() {
