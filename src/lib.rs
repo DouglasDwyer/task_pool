@@ -326,6 +326,7 @@ impl<P: 'static + Send + Clone + Ord, M: MutexLockStrategy> TaskQueue<P, M> {
         self.wake_listeners();
         
         if let Some(unit) = work_unit {
+            drop(tqs);
             unit.execute();
         }
 
