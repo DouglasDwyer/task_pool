@@ -262,6 +262,8 @@ impl<I: 'static + Send, R: 'static, O: 'static + Send, M: MutexLockStrategy> Tas
         let mut fts = M::lock(&self.state.mutex).unwrap();
         while fts.left != 0 {
             fts = M::wait(&self.state.condvar, fts).unwrap();
+            drop(fts);
+            fts = M::lock(&self.state.mutex).unwrap();
         }
 
         std::mem::replace(&mut fts.output, None).unwrap()
