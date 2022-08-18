@@ -161,21 +161,21 @@ impl<M: MutexLockStrategy> WorkProvider for EmptyWorkProvider<M> {
     }
 }
 
-pub struct SingletonTask<I: 'static + Send = (), R: 'static + Send = ()>(FoldTask<I, R, Vec<R>>);
+pub struct SingletonTask<I: 'static + Send, R: 'static + Send, M: MutexLockStrategy>(FoldTask<I, R, Vec<R>, M>);
 
-impl<I: 'static + Send, R: Send> SingletonTask<I, R> {
+impl<I: 'static + Send, R: Send, M: MutexLockStrategy> SingletonTask<I, R, M> {
     pub fn new(func: impl Fn(I) -> R + Send + Sync + 'static, input: I) -> Self {
         Self(FoldTask::new(func, |v, r| v.push(r), Vec::new(), vec!(input)))
     }
 }
 
-impl<I: 'static + Send, R: 'static + Send> WorkCollection for SingletonTask<I, R> {
+impl<I: 'static + Send, R: 'static + Send, M: MutexLockStrategy> WorkCollection for SingletonTask<I, R, M> {
     fn next_unit(&self) -> Option<Box<dyn WorkUnit>> {
         self.0.next_unit()
     }
 }
 
-impl<I: 'static + Send, R: 'static + Send> Task for SingletonTask<I, R> {
+impl<I: 'static + Send, R: 'static + Send, M: MutexLockStrategy> Task for SingletonTask<I, R, M> {
     type Output = R;
 
     fn complete(&self) -> bool {
@@ -187,21 +187,21 @@ impl<I: 'static + Send, R: 'static + Send> Task for SingletonTask<I, R> {
     }
 }
 
-pub struct MapTask<I: 'static + Send, R: 'static + Send>(FoldTask<I, R, Vec<R>>);
+pub struct MapTask<I: 'static + Send, R: 'static + Send, M: MutexLockStrategy>(FoldTask<I, R, Vec<R>, M>);
 
-impl<I: 'static + Send, R: Send> MapTask<I, R> {
+impl<I: 'static + Send, R: Send, M: MutexLockStrategy> MapTask<I, R, M> {
     pub fn new(func: impl Fn(I) -> R + Send + Sync + 'static, input: Vec<I>) -> Self {
         Self(FoldTask::new(func, |v, r| v.push(r), Vec::new(), input))
     }
 }
 
-impl<I: 'static + Send, R: 'static + Send> WorkCollection for MapTask<I, R> {
+impl<I: 'static + Send, R: 'static + Send, M: MutexLockStrategy> WorkCollection for MapTask<I, R, M> {
     fn next_unit(&self) -> Option<Box<dyn WorkUnit>> {
         self.0.next_unit()
     }
 }
 
-impl<I: 'static + Send, R: 'static + Send> Task for MapTask<I, R> {
+impl<I: 'static + Send, R: 'static + Send, M: MutexLockStrategy> Task for MapTask<I, R, M> {
     type Output = Vec<R>;
 
     fn complete(&self) -> bool {
@@ -213,7 +213,7 @@ impl<I: 'static + Send, R: 'static + Send> Task for MapTask<I, R> {
     }
 }
 
-pub struct FoldTask<I: 'static + Send, R, O: 'static + Send, M: MutexLockStrategy = DefaultMutexLockStrategy> {
+pub struct FoldTask<I: 'static + Send, R, O: 'static + Send, M: MutexLockStrategy> {
     func: Arc<dyn Fn(I) -> R + Send + Sync>,
     fold: Arc<dyn Fn(&mut O, R) + Send + Sync>,
     state: Arc<CondMutex<FlatmapTaskState<I, O>>>,
