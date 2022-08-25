@@ -481,11 +481,14 @@ impl<O: 'static, P: Ord + Clone, M: MutexLockStrategy> TaskHandle<O, P, M> {
     }
 
     pub fn join(self) -> O {
+        self.join_work();
+        self.task.work.wait()
+    }
+
+    pub fn join_work(&self) {
         while let Some(unit) = self.task.next_unit() {
             unit.execute();
         }
-
-        self.task.work.wait()
     }
 
     pub fn cancel(self) {
