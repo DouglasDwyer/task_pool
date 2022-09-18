@@ -492,7 +492,7 @@ impl<O: 'static, P: Ord + Clone, M: MutexLockStrategy> TaskHandle<O, P, M> {
     }
 
     pub fn cancel(self) {
-        self.state.mutex.lock().unwrap().cancel_task(&self.work);
+       M::lock(&self.state.mutex).unwrap().cancel_task(&self.work);
     }
 }
 
