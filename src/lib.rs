@@ -134,7 +134,7 @@ pub struct TaskPoolStackGuard<'a, M: MutexLockStrategy> {
 
 impl<'a, M: MutexLockStrategy> TaskPoolStackGuard<'a, M> {
     pub fn forget(self) {
-        let _ = std::mem::ManuallyDrop::new(self);
+        drop(std::mem::ManuallyDrop::new(self));
     }
 }
 
@@ -152,7 +152,7 @@ pub struct EmptyWorkProvider<M: MutexLockStrategy = DefaultMutexLockStrategy> {
 
 impl<M: MutexLockStrategy> WorkProvider for EmptyWorkProvider<M> {
     fn next_unit(&self) -> Option<Box<dyn WorkUnit>> {
-        let _ = M::wait(&self.state.condvar, M::lock(&self.state.mutex).unwrap()).unwrap();
+        drop(M::wait(&self.state.condvar, M::lock(&self.state.mutex).unwrap()).unwrap());
         None
     }
 
@@ -349,7 +349,7 @@ impl<P: 'static + Send + Clone + Ord, M: MutexLockStrategy> WorkProvider for Tas
         let res = tqs.next_unit();
 
         if res.is_none() {
-            let _ = M::wait(&self.state.condvar, tqs).unwrap();
+            drop(M::wait(&self.state.condvar, tqs).unwrap());
         }
 
         res
@@ -362,7 +362,7 @@ impl<P: 'static + Send + Clone + Ord, M: MutexLockStrategy> WorkProvider for Tas
 
 struct TaskQueueState<P: Ord + Clone, M: MutexLockStrategy> {
     current: Option<WorkReference<dyn WorkCollection>>,
-    queue: priority_queue::PriorityQueue<WorkReference<dyn WorkCollection>, P>,
+    queue: priority_queue::PriorityQueue<WorkReference<dyn WorkCollection>, P, std::collections::hash_map::RandomState>,
     data: PhantomData<M>
 }
 
@@ -372,7 +372,7 @@ impl<P: Ord + Clone, M: MutexLockStrategy> TaskQueueState<P, M> {
     }
 
     pub fn set_priority(&mut self, task: &WorkReference<dyn WorkCollection>, priority: P) {
-        let _ = self.queue.change_priority(&task, priority);
+        drop(self.queue.change_priority(&task, priority));
     }
 
     pub fn cancel_task(&mut self, task: &WorkReference<dyn WorkCollection>) {
@@ -400,14 +400,14 @@ impl<P: Ord + Clone, M: MutexLockStrategy> TaskQueueState<P, M> {
     }
 
     pub fn push_task(&mut self, task: WorkReference<dyn WorkCollection>, priority: P) {
-        let _ = self.queue.push(task, priority);
+        drop(self.queue.push(task, priority));
     }
 }
 
 impl<P: Ord + Clone, M: MutexLockStrategy> Default for TaskQueueState<P, M> {
     fn default() -> Self {
         let current = None;
-        let queue = priority_queue::PriorityQueue::new();
+        let queue = priority_queue::PriorityQueue::default();
         let data = PhantomData::default();
         Self { current, queue, data }
     }
