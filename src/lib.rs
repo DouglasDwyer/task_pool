@@ -421,7 +421,7 @@ impl<T: Send + Sync, P: Ord + Send> Task<T, Priority<P>> {
     /// Updates the priority of this task to the specified value.
     pub fn set_priority(&mut self, priority: P) {
         unsafe {
-            self.backing.inner.lock().unwrap_unchecked().queued.inner.push(PriorityHolder(self.control.clone()), priority);
+            self.backing.inner.lock().unwrap_unchecked().queued.inner.change_priority(&PriorityHolder(self.control.clone()), priority);
         }
     }
 }
@@ -518,7 +518,7 @@ struct CondvarWakerInner {
     /// The lock that should be used for waiting.
     lock: wasm_sync::Mutex<()>,
     /// The condition variable that is alerted on wake.
-    on_wake: Condvar
+    on_wake: wasm_sync::Condvar
 }
 
 /// Marks a task queue as executing events in a first-in-first-out order.
@@ -655,7 +655,7 @@ impl<P: Ord + Send + Sync> TaskQueue<Priority<P>> {
             let mut queue = self.inner.inner.lock().unwrap_unchecked();
 
             if queue.queued.is_empty() {
-                self.inner.notifier.notify();    
+                self.inner.notifier.notify();
             }
 
             queue.queued.inner.push(PriorityHolder(work.control()), priority);
@@ -667,7 +667,7 @@ impl<P: Ord + Send + Sync> TaskQueue<Priority<P>> {
 impl<B: QueueBacking> Default for TaskQueue<B> {
     fn default() -> Self {
         Self {
-            inner: Arc::new(TaskQueueHolder { notifier: ChangeNotifier::default(), inner: Mutex::new(TaskQueueInner { current: None, queued: B::new() }) })
+            inner: Arc::new(TaskQueueHolder { notifier: ChangeNotifier::default(), inner: wasm_sync::Mutex::new(TaskQueueInner { current: None, queued: B::new() }) })
         }
     }
 }
@@ -873,6 +873,28 @@ mod tests {
         4).forget();
 
         assert_eq!(first_task.join(), second_task.join());
+    }
+
+    #[test]
+    fn execute_double_twice() {
+        let queue_a = TaskQueue::<Fifo>::default();
+        let queue_b = TaskQueue::<Lifo>::default();
+
+        let first_task = queue_a.spawn(once(|| 2));
+        let second_task = queue_b.spawn(once(|| 2));
+
+        TaskPool::new(ChainedWorkProvider::default()
+            .with(queue_a.clone())
+            .with(queue_b.clone()),
+        1).forget();
+
+        assert_eq!(first_task.join(), second_task.join());
+
+        for _i in 0..1000 {
+            let third_task = queue_a.spawn(once(|| std::thread::sleep(std::time::Duration::new(0, 10))));
+            let fourth_task = queue_b.spawn(once(|| std::thread::sleep(std::time::Duration::new(0, 200))));
+            assert_eq!(third_task.join(), fourth_task.join());
+        }
     }
 
     #[test]
