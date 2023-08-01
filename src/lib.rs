@@ -3,32 +3,32 @@
 #![warn(clippy::missing_docs_in_private_items)]
 
 //! `task_pool` offers a flexible abstraction for composing and distributing work within a fixed hardware threadpool. To that end, it offers the following features:
-//! 
+//!
 //! - The ability to define and compose sources of work
 //! - The ability to create hardware threadpool and consume those sources
 //! - A variety of high-level abstractions for scheduling, such as awaitable tasks
-//! 
+//!
 //! ### Usage
-//! 
+//!
 //! To use `task_pool`, there are three steps:
-//! 
+//!
 //! 1. Creating and initializing [`WorkProvider`] instances (such as a queue or chain of multiple queues)
 //! 2. Creating a hardware [`TaskPool`] which consumes those instances
 //! 3. Spawning high-level tasks on the [`WorkProvider`]s which are handled by the threadpool
-//! 
+//!
 //! The following example shows these steps in action:
-//! 
+//!
 //! ```rust
 //! # use task_pool::*;
 //! // 1. Create a queue from which we can spawn tasks
 //! let queue = TaskQueue::<Fifo>::default();
-//! 
+//!
 //! // 2. Create a threadpool that draws from the provided queue. Forget the threadpool so that it runs indefinitely.
 //! TaskPool::new(queue.clone(), 4).forget();
-//! 
+//!
 //! // 3. Spawn a task into the queue and synchronously await its completion.
 //! assert_eq!(queue.spawn(once(|| { println!("This will execute on background thread."); 2 })).join(), 2);
-//! 
+//!
 //! // ...or, asynchronously await its completion.
 //! # async fn hide() {
 //! # let queue = TaskQueue::<Fifo>::default();
@@ -46,8 +46,8 @@ use std::hash::*;
 use std::marker::*;
 use std::mem::*;
 use std::ops::*;
-use std::sync::*;
 use std::sync::atomic::*;
+use std::sync::*;
 use std::task::*;
 use takecell::*;
 
@@ -73,8 +73,13 @@ impl ChainedWorkProvider {
     /// will attempt to use this provider when all previously-added providers are empty.
     pub fn with(mut self, provider: impl WorkProvider) -> Self {
         let notifier_cloned = self.notifier.clone();
-        let listener = provider.change_notifier().add_listener(move || notifier_cloned.notify());
-        self.providers.push(ChainedWorkProviderEntry { listener, provider: Box::new(provider) });
+        let listener = provider
+            .change_notifier()
+            .add_listener(move || notifier_cloned.notify());
+        self.providers.push(ChainedWorkProviderEntry {
+            listener,
+            provider: Box::new(provider),
+        });
         self
     }
 }
@@ -107,7 +112,7 @@ struct ChainedWorkProviderEntry {
     /// The listener handle which ensures that notifications from the provider are received.
     pub listener: ChangeNotificationListener,
     /// The work provider.
-    pub provider: Box<dyn WorkProvider>
+    pub provider: Box<dyn WorkProvider>,
 }
 
 /// A single, atomic unit of work that one thread should process.
@@ -126,7 +131,7 @@ impl<F: FnOnce()> WorkUnit for F {
 #[derive(Default)]
 pub struct ChangeNotifier {
     /// The listeners that are registered to this change notifier.
-    listeners: wasm_sync::RwLock<Vec<Weak<dyn Fn() + Send + Sync>>>
+    listeners: wasm_sync::RwLock<Vec<Weak<dyn Fn() + Send + Sync>>>,
 }
 
 impl ChangeNotifier {
@@ -141,8 +146,14 @@ impl ChangeNotifier {
 
     /// Registers the specified callback to be invoked upon change. Returns a listener that
     /// must be kept alive to receive notifications.
-    pub fn add_listener(&self, listener: impl 'static + Fn() + Send + Sync) -> ChangeNotificationListener {
-        let mut listeners = self.listeners.write().expect("Could not acquire write lock.");
+    pub fn add_listener(
+        &self,
+        listener: impl 'static + Fn() + Send + Sync,
+    ) -> ChangeNotificationListener {
+        let mut listeners = self
+            .listeners
+            .write()
+            .expect("Could not acquire write lock.");
         Self::clear_dead_listeners(&mut listeners);
         let result = Arc::new(listener) as Arc<dyn Fn() + Send + Sync>;
         listeners.push(Arc::downgrade(&result));
@@ -161,8 +172,7 @@ impl ChangeNotifier {
                 let item = view.get_unchecked_mut(i);
                 if item.assume_init_ref().strong_count() == 0 {
                     item.assume_init_drop();
-                }
-                else {
+                } else {
                     view.swap(i, finish);
                     finish += 1;
                 }
@@ -199,30 +209,45 @@ pub struct TaskPool {
 impl TaskPool {
     /// Creates a new pool that draws work from the given provider, with the specified number of background threads.
     pub fn new(provider: impl WorkProvider, threads: usize) -> Self {
-        Self::with_spawner(provider, threads, |_, f| { std::thread::spawn(f); })
+        Self::with_spawner(provider, threads, |_, f| {
+            std::thread::spawn(f);
+        })
     }
 
     /// Creates a new pool that draws work from the given provider, with the specified number of background threads.
     /// The custom spawning function is invoked to create each thread.
-    pub fn with_spawner(provider: impl WorkProvider, threads: usize, mut spawner: impl FnMut(usize, Box<dyn 'static + FnOnce() + Send>)) -> Self {
+    pub fn with_spawner(
+        provider: impl WorkProvider,
+        threads: usize,
+        mut spawner: impl FnMut(usize, Box<dyn 'static + FnOnce() + Send>),
+    ) -> Self {
         let inner = Arc::new(TaskPoolInner::new(provider));
-        
+
         for id in 0..threads {
             let inner_clone = inner.clone();
             spawner(id, Box::new(move || inner_clone.run()));
         }
 
         let inner_clone = inner.clone();
-        let change_listener = inner.provider().change_notifier().add_listener(move || inner_clone.notify_changed());
+        let change_listener = inner
+            .provider()
+            .change_notifier()
+            .add_listener(move || inner_clone.notify_changed());
 
-        Self { change_listener_inner: Some((change_listener, inner)) }
+        Self {
+            change_listener_inner: Some((change_listener, inner)),
+        }
     }
 
     /// Drops this task pool without stopping the associated threads. The threads
     /// become leaked, and will run for the program's duration.
     pub fn forget(mut self) {
         unsafe {
-            forget(replace(&mut self.change_listener_inner, None).unwrap_unchecked().0);
+            forget(
+                replace(&mut self.change_listener_inner, None)
+                    .unwrap_unchecked()
+                    .0,
+            );
         }
     }
 }
@@ -254,7 +279,7 @@ impl TaskPoolInner {
             work_provider: Box::new(provider),
             task_counter: AtomicI32::new(1),
             on_change: wasm_sync::Condvar::default(),
-            lock: wasm_sync::Mutex::default()
+            lock: wasm_sync::Mutex::default(),
         }
     }
 
@@ -286,11 +311,12 @@ impl TaskPoolInner {
             match task_value.cmp(&0) {
                 std::cmp::Ordering::Less => self.wait_for_change::<false>(task_value),
                 std::cmp::Ordering::Equal => return,
-                std::cmp::Ordering::Greater => if let Some(unit) = self.work_provider.next_task() {
-                    unit.execute();
-                }
-                else {
-                    self.wait_for_change::<true>(task_value);
+                std::cmp::Ordering::Greater => {
+                    if let Some(unit) = self.work_provider.next_task() {
+                        unit.execute();
+                    } else {
+                        self.wait_for_change::<true>(task_value);
+                    }
                 }
             }
         }
@@ -340,7 +366,7 @@ pub struct Task<T, B: QueueBacking> {
     /// A pointer to the function which extracts the result for the task.
     result: fn(*const ()) -> T,
     /// The task queue which owns the control block.
-    backing: Arc<TaskQueueHolder<B>>
+    backing: Arc<TaskQueueHolder<B>>,
 }
 
 impl<T, B: QueueBacking> Task<T, B> {
@@ -350,7 +376,11 @@ impl<T, B: QueueBacking> Task<T, B> {
             let control = Arc::new(TaskControl::new(provider));
             let result = transmute(C::result as fn(&C) -> T);
 
-            Self { control, result, backing }
+            Self {
+                control,
+                result,
+                backing,
+            }
         }
     }
 
@@ -368,14 +398,13 @@ impl<T, B: QueueBacking> Task<T, B> {
     pub fn complete(&self) -> bool {
         self.control.complete()
     }
-    
+
     /// Attempts to get the result of this task if it has been completed. Otherwise, returns
     /// the original task.
     pub fn result(self) -> Result<T, Self> {
         if self.complete() {
             Ok(self.join())
-        }
-        else {
+        } else {
             Err(self)
         }
     }
@@ -389,11 +418,10 @@ impl<T, B: QueueBacking> Task<T, B> {
             }
 
             self.control.cancel();
-    
+
             if self.complete() {
                 self.get_result()
-            }
-            else {
+            } else {
                 let waker = CondvarWaker::default();
                 let guard = waker.lock.lock().unwrap_unchecked();
                 self.control.set_result_waker(waker.as_waker());
@@ -413,7 +441,7 @@ impl<T, B: QueueBacking> Task<T, B> {
 
     /// Gets the result of this task.
     unsafe fn get_result(&self) -> T {
-        (self.result)(transmute::<_, (*const (), *const())>(self.control.collection()).0)
+        (self.result)(transmute::<_, (*const (), *const ())>(self.control.collection()).0)
     }
 }
 
@@ -421,7 +449,13 @@ impl<T, P: Ord + Send> Task<T, Priority<P>> {
     /// Updates the priority of this task to the specified value.
     pub fn set_priority(&mut self, priority: P) {
         unsafe {
-            self.backing.inner.lock().unwrap_unchecked().queued.inner.change_priority(&PriorityHolder(self.control.clone()), priority);
+            self.backing
+                .inner
+                .lock()
+                .unwrap_unchecked()
+                .queued
+                .inner
+                .change_priority(&PriorityHolder(self.control.clone()), priority);
         }
     }
 }
@@ -433,8 +467,7 @@ impl<T, B: QueueBacking> Future for Task<T, B> {
         unsafe {
             if self.complete() {
                 Poll::Ready(self.get_result())
-            }
-            else {
+            } else {
                 self.control.set_result_waker(cx.waker().clone());
                 Poll::Pending
             }
@@ -446,46 +479,55 @@ impl<T, B: QueueBacking> Future for Task<T, B> {
 #[derive(Clone, Default)]
 struct CondvarWaker {
     /// The inner backing for the waker.
-    inner: Arc<CondvarWakerInner>
+    inner: Arc<CondvarWakerInner>,
 }
 
 impl CondvarWaker {
     /// Converts this to a waker.
     pub fn as_waker(&self) -> Waker {
         unsafe {
-            Waker::from_raw(Self::clone_waker(&self.inner as *const Arc<CondvarWakerInner> as *const ()))
+            Waker::from_raw(Self::clone_waker(
+                &self.inner as *const Arc<CondvarWakerInner> as *const (),
+            ))
         }
     }
 
     /// Clones the waker.
-    /// 
+    ///
     /// # Safety
-    /// 
+    ///
     /// For this function to be sound, inner must be a valid pointer to an `Arc<CondvarWakerInner>`.
     unsafe fn clone_waker(inner: *const ()) -> RawWaker {
         unsafe {
             let value = &*(inner as *const Arc<CondvarWakerInner>);
             let data = Box::into_raw(Box::new(value.clone()));
 
-            RawWaker::new(data as *const (), &RawWakerVTable::new(Self::clone_waker, Self::wake_waker, Self::wake_by_ref_waker, Self::drop_waker))
+            RawWaker::new(
+                data as *const (),
+                &RawWakerVTable::new(
+                    Self::clone_waker,
+                    Self::wake_waker,
+                    Self::wake_by_ref_waker,
+                    Self::drop_waker,
+                ),
+            )
         }
     }
 
     /// Wakes the waker, and consumes the pointer.
-    /// 
+    ///
     /// # Safety
-    /// 
+    ///
     /// For this function to be sound, inner must be a valid owned pointer to an `Arc<CondvarWakerInner>`.
     unsafe fn wake_waker(inner: *const ()) {
         Self::wake_by_ref_waker(inner);
         Self::drop_waker(inner);
     }
 
-
     /// Wakes the waker.
-    /// 
+    ///
     /// # Safety
-    /// 
+    ///
     /// For this function to be sound, inner must be a valid pointer to an `Arc<CondvarWakerInner>`.
     #[allow(unused_variables)]
     unsafe fn wake_by_ref_waker(inner: *const ()) {
@@ -495,9 +537,9 @@ impl CondvarWaker {
     }
 
     /// Drops the waker, consuming the given pointer.
-    /// 
+    ///
     /// # Safety
-    /// 
+    ///
     /// For this function to be sound, inner must be a valid owned pointer to an `Arc<CondvarWakerInner>`.
     unsafe fn drop_waker(inner: *const ()) {
         drop(Box::from_raw(inner as *mut Arc<CondvarWakerInner>));
@@ -518,19 +560,21 @@ struct CondvarWakerInner {
     /// The lock that should be used for waiting.
     lock: wasm_sync::Mutex<()>,
     /// The condition variable that is alerted on wake.
-    on_wake: wasm_sync::Condvar
+    on_wake: wasm_sync::Condvar,
 }
 
 /// Marks a task queue as executing events in a first-in-first-out order.
 #[derive(Debug)]
 pub struct Fifo {
     /// The inner storage for the queue.
-    inner: VecDeque<Arc<TaskControl>>
+    inner: VecDeque<Arc<TaskControl>>,
 }
 
 impl QueueBacking for Fifo {
     fn new() -> Self {
-        Self { inner: VecDeque::new() }
+        Self {
+            inner: VecDeque::new(),
+        }
     }
 
     fn is_empty(&self) -> bool {
@@ -552,7 +596,7 @@ impl PushPopQueueBacking for Fifo {
 #[derive(Debug)]
 pub struct Lifo {
     /// The inner storage for the queue.
-    inner: Vec<Arc<TaskControl>>
+    inner: Vec<Arc<TaskControl>>,
 }
 
 impl QueueBacking for Lifo {
@@ -605,12 +649,14 @@ impl Hash for PriorityHolder {
 #[derive(Debug)]
 pub struct Priority<P: 'static + Ord + Send> {
     /// The backing queue for events.
-    inner: PriorityQueue<PriorityHolder, P, FxBuildHasher>
+    inner: PriorityQueue<PriorityHolder, P, FxBuildHasher>,
 }
 
 impl<P: Ord + Send> QueueBacking for Priority<P> {
     fn new() -> Self {
-        Self { inner: PriorityQueue::default() }
+        Self {
+            inner: PriorityQueue::default(),
+        }
     }
 
     fn is_empty(&self) -> bool {
@@ -618,7 +664,7 @@ impl<P: Ord + Send> QueueBacking for Priority<P> {
     }
 
     fn next(&mut self) -> Option<Arc<TaskControl>> {
-        self.inner.pop().map(|x| x.0.0)
+        self.inner.pop().map(|x| x.0 .0)
     }
 }
 
@@ -626,7 +672,7 @@ impl<P: Ord + Send> QueueBacking for Priority<P> {
 #[derive(Debug)]
 pub struct TaskQueue<B: QueueBacking> {
     /// The implementation holder for this queue.
-    inner: Arc<TaskQueueHolder<B>>
+    inner: Arc<TaskQueueHolder<B>>,
 }
 
 impl<B: PushPopQueueBacking> TaskQueue<B> {
@@ -657,11 +703,11 @@ impl<B: PushPopQueueBacking> TaskQueue<B> {
     fn push_control(&self, control: Arc<TaskControl>) {
         unsafe {
             let mut queue = self.inner.inner.lock().unwrap_unchecked();
-    
+
             if queue.queued.is_empty() {
                 self.inner.notifier.notify();
             }
-    
+
             queue.queued.push(control);
         }
     }
@@ -708,14 +754,22 @@ impl<P: Ord + Send + Sync> TaskQueue<Priority<P>> {
 impl<B: QueueBacking> Default for TaskQueue<B> {
     fn default() -> Self {
         Self {
-            inner: Arc::new(TaskQueueHolder { notifier: ChangeNotifier::default(), inner: wasm_sync::Mutex::new(TaskQueueInner { current: None, queued: B::new() }) })
+            inner: Arc::new(TaskQueueHolder {
+                notifier: ChangeNotifier::default(),
+                inner: wasm_sync::Mutex::new(TaskQueueInner {
+                    current: None,
+                    queued: B::new(),
+                }),
+            }),
         }
     }
 }
 
 impl<B: QueueBacking> Clone for TaskQueue<B> {
     fn clone(&self) -> Self {
-        Self { inner: self.inner.clone() }
+        Self {
+            inner: self.inner.clone(),
+        }
     }
 }
 
@@ -733,18 +787,20 @@ impl<B: QueueBacking> WorkProvider for TaskQueue<B> {
                     if current.increment_in_progress() {
                         if let Some(unit) = current.collection().next_task() {
                             let control = current.clone();
-                            return Some(Box::new(move || { unit.execute(); control.decrement_in_progress() }));
-                        }
-                        else {
+                            return Some(Box::new(move || {
+                                unit.execute();
+                                control.decrement_in_progress()
+                            }));
+                        } else {
                             current.cancel();
                             current.decrement_in_progress();
                         }
                     }
                 }
-                
+
                 inner.current = inner.queued.next();
                 inner.current.as_ref()?;
-            }     
+            }
         }
     }
 }
@@ -755,7 +811,7 @@ struct TaskQueueHolder<B: QueueBacking> {
     /// A notifier that may be used to alert other threads to newly-available work.
     notifier: ChangeNotifier,
     /// The inner queue state.
-    inner: wasm_sync::Mutex<TaskQueueInner<B>>
+    inner: wasm_sync::Mutex<TaskQueueInner<B>>,
 }
 
 /// Maintains the current state of a task queue.
@@ -764,7 +820,7 @@ struct TaskQueueInner<B: QueueBacking> {
     /// The piece of in-progress work, if any.
     current: Option<Arc<TaskControl>>,
     /// The queue that holds upcoming work.
-    queued: B
+    queued: B,
 }
 
 /// Returns a queueable task that executes a single closure one time.
@@ -778,7 +834,7 @@ pub fn once<T: 'static + Send>(f: impl 'static + FnOnce() -> T + Send) -> impl T
         /// The closure to execute.
         f: TakeOwnCell<Box<dyn WorkUnit>>,
         /// The result of the closure.
-        result: Arc<ArcSwapOption<SyncWrapper<T>>>
+        result: Arc<ArcSwapOption<SyncWrapper<T>>>,
     }
 
     impl<T: Send> TaskProvider for OnceTask<T> {
@@ -790,7 +846,13 @@ pub fn once<T: 'static + Send>(f: impl 'static + FnOnce() -> T + Send) -> impl T
     impl<T: Send> TaskCollection<T> for OnceTask<T> {
         fn result(&self) -> T {
             unsafe {
-                Arc::into_inner(self.result.swap(None).expect("Task was not yet complete or already taken.")).unwrap_unchecked().0
+                Arc::into_inner(
+                    self.result
+                        .swap(None)
+                        .expect("Task was not yet complete or already taken."),
+                )
+                .unwrap_unchecked()
+                .0
             }
         }
     }
@@ -800,7 +862,12 @@ pub fn once<T: 'static + Send>(f: impl 'static + FnOnce() -> T + Send) -> impl T
 
     let result = Arc::new(ArcSwapOption::const_empty());
     let result_cloned = result.clone();
-    OnceTask { f: TakeOwnCell::new(Box::new(move || { result_cloned.store(Some(Arc::new(SyncWrapper(f())))); })), result }
+    OnceTask {
+        f: TakeOwnCell::new(Box::new(move || {
+            result_cloned.store(Some(Arc::new(SyncWrapper(f()))));
+        })),
+        result,
+    }
 }
 
 /// Hides implementation details from external crates.
@@ -822,7 +889,7 @@ mod private {
         /// Pushes the given control block onto the task queue.
         fn push(&mut self, task: Arc<TaskControl>);
     }
-    
+
     /// Manages the execution of work for a task.
     pub struct TaskControl {
         /// The collection of work associated with the task.
@@ -830,7 +897,7 @@ mod private {
         /// The number of work units in-progress.
         pub in_progress: AtomicUsize,
         /// A waker that should by used to notify other threads when this task has completed.
-        result_waker: ArcSwapOption<Waker>
+        result_waker: ArcSwapOption<Waker>,
     }
 
     impl TaskControl {
@@ -843,12 +910,17 @@ mod private {
             let in_progress = AtomicUsize::default();
             let result_waker = ArcSwapOption::const_empty();
 
-            Self { collection, in_progress, result_waker }
+            Self {
+                collection,
+                in_progress,
+                result_waker,
+            }
         }
 
         /// Cancels this task.
         pub fn cancel(&self) {
-            self.in_progress.fetch_or(Self::CANCEL_FLAG, Ordering::Release);
+            self.in_progress
+                .fetch_or(Self::CANCEL_FLAG, Ordering::Release);
         }
 
         /// Gets the collection of work associated with this task.
@@ -863,7 +935,11 @@ mod private {
 
         /// Increments the number of in-progress tasks by one, returning whether this task has been cancelled.
         pub fn increment_in_progress(&self) -> bool {
-            self.in_progress.fetch_update(Ordering::AcqRel, Ordering::Acquire, |x| (x < Self::CANCEL_FLAG).then_some(x + 1)).is_ok()
+            self.in_progress
+                .fetch_update(Ordering::AcqRel, Ordering::Acquire, |x| {
+                    (x < Self::CANCEL_FLAG).then_some(x + 1)
+                })
+                .is_ok()
         }
 
         /// Decrements the number of in-progress tasks by the specified amount.
@@ -883,7 +959,10 @@ mod private {
 
     impl std::fmt::Debug for TaskControl {
         fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-            f.debug_struct("TaskControl").field("in_progress", &self.in_progress).field("result_waker", &self.result_waker).finish()
+            f.debug_struct("TaskControl")
+                .field("in_progress", &self.in_progress)
+                .field("result_waker", &self.result_waker)
+                .finish()
         }
     }
 }
@@ -897,7 +976,15 @@ mod tests {
         let queue = TaskQueue::<Fifo>::default();
         TaskPool::new(queue.clone(), 4).forget();
 
-        assert_eq!(queue.spawn(once(|| { println!("This will execute on background thread."); 2 })).await, 2);
+        assert_eq!(
+            queue
+                .spawn(once(|| {
+                    println!("This will execute on background thread.");
+                    2
+                }))
+                .await,
+            2
+        );
     }
 
     #[test]
@@ -908,10 +995,13 @@ mod tests {
         let first_task = queue_a.spawn(once(|| 2));
         let second_task = queue_b.spawn(once(|| 2));
 
-        TaskPool::new(ChainedWorkProvider::default()
-            .with(queue_a.clone())
-            .with(queue_b.clone()),
-        4).forget();
+        TaskPool::new(
+            ChainedWorkProvider::default()
+                .with(queue_a.clone())
+                .with(queue_b.clone()),
+            4,
+        )
+        .forget();
 
         assert_eq!(first_task.join(), second_task.join());
     }
@@ -924,16 +1014,22 @@ mod tests {
         let first_task = queue_a.spawn(once(|| 2));
         let second_task = queue_b.spawn(once(|| 2));
 
-        TaskPool::new(ChainedWorkProvider::default()
-            .with(queue_a.clone())
-            .with(queue_b.clone()),
-        1).forget();
+        TaskPool::new(
+            ChainedWorkProvider::default()
+                .with(queue_a.clone())
+                .with(queue_b.clone()),
+            1,
+        )
+        .forget();
 
         assert_eq!(first_task.join(), second_task.join());
 
         for _i in 0..1000 {
-            let third_task = queue_a.spawn(once(|| std::thread::sleep(std::time::Duration::new(0, 10))));
-            let fourth_task = queue_b.spawn(once(|| std::thread::sleep(std::time::Duration::new(0, 200))));
+            let third_task =
+                queue_a.spawn(once(|| std::thread::sleep(std::time::Duration::new(0, 10))));
+            let fourth_task = queue_b.spawn(once(|| {
+                std::thread::sleep(std::time::Duration::new(0, 200))
+            }));
             assert_eq!(third_task.join(), fourth_task.join());
         }
     }
