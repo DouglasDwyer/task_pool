@@ -327,14 +327,14 @@ pub trait TaskProvider: 'static + Send + Sync {
 }
 
 /// Represents a task that returns a result of the given type.
-pub trait TaskCollection<T: Send>: TaskProvider + Sized {
+pub trait TaskCollection<T>: TaskProvider + Sized {
     /// Gets the result from this task.
     fn result(&self) -> T;
 }
 
 /// A handle to a queued group of work units, which output a single result.
 #[derive(Debug)]
-pub struct Task<T: 'static + Send, B: QueueBacking> {
+pub struct Task<T, B: QueueBacking> {
     /// The control block for this task.
     control: Arc<TaskControl>,
     /// A pointer to the function which extracts the result for the task.
@@ -343,7 +343,7 @@ pub struct Task<T: 'static + Send, B: QueueBacking> {
     backing: Arc<TaskQueueHolder<B>>
 }
 
-impl<T: Send, B: QueueBacking> Task<T, B> {
+impl<T, B: QueueBacking> Task<T, B> {
     /// Creates a new task for the given collection and backing.
     fn new<C: TaskCollection<T>>(provider: C, backing: Arc<TaskQueueHolder<B>>) -> Self {
         unsafe {
@@ -417,7 +417,7 @@ impl<T: Send, B: QueueBacking> Task<T, B> {
     }
 }
 
-impl<T: Send + Sync, P: Ord + Send> Task<T, Priority<P>> {
+impl<T, P: Ord + Send> Task<T, Priority<P>> {
     /// Updates the priority of this task to the specified value.
     pub fn set_priority(&mut self, priority: P) {
         unsafe {
@@ -426,7 +426,7 @@ impl<T: Send + Sync, P: Ord + Send> Task<T, Priority<P>> {
     }
 }
 
-impl<T: Send + Sync, B: QueueBacking> Future for Task<T, B> {
+impl<T, B: QueueBacking> Future for Task<T, B> {
     type Output = T;
 
     fn poll(self: std::pin::Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
@@ -633,7 +633,7 @@ impl<B: PushPopQueueBacking> TaskQueue<B> {
     /// Joins the pool in executing the given task. Both the current thread and the background
     /// threads complete the task's work. Semantically, this is equivalent to calling `spawn(task).join()`,
     /// but is more efficient by ensuring that the present thread always receives at least one work item.
-    pub fn join<T: 'static + Send + Sync>(&self, task: impl TaskCollection<T>) -> T {
+    pub fn join<T>(&self, task: impl TaskCollection<T>) -> T {
         let work = Task::new(task, self.inner.clone());
         let next_job = work.control.collection().next_task();
 
@@ -647,7 +647,7 @@ impl<B: PushPopQueueBacking> TaskQueue<B> {
     }
 
     /// Spawns a new task into the queue.
-    pub fn spawn<T: 'static + Send + Sync>(&self, task: impl TaskCollection<T>) -> Task<T, B> {
+    pub fn spawn<T>(&self, task: impl TaskCollection<T>) -> Task<T, B> {
         let work = Task::new(task, self.inner.clone());
         self.push_control(work.control());
         work
@@ -671,7 +671,7 @@ impl<P: Ord + Send + Sync> TaskQueue<Priority<P>> {
     /// Joins the pool in executing the given task. Both the current thread and the background
     /// threads complete the task's work. Semantically, this is equivalent to calling `spawn(task).join()`,
     /// but is more efficient by ensuring that the present thread always receives at least one work item.
-    pub fn join<T: 'static + Send + Sync>(&self, priority: P, task: impl TaskCollection<T>) -> T {
+    pub fn join<T>(&self, priority: P, task: impl TaskCollection<T>) -> T {
         let work = Task::new(task, self.inner.clone());
         let next_job = work.control.collection().next_task();
 
@@ -685,7 +685,7 @@ impl<P: Ord + Send + Sync> TaskQueue<Priority<P>> {
     }
 
     /// Spawns a new task into the queue, with the given priority.
-    pub fn spawn<T: 'static + Send + Sync>(&self, priority: P, task: impl TaskCollection<T>) -> Task<T, Priority<P>> {
+    pub fn spawn<T>(&self, priority: P, task: impl TaskCollection<T>) -> Task<T, Priority<P>> {
         let work = Task::new(task, self.inner.clone());
         self.push_control(priority, work.control());
         work
