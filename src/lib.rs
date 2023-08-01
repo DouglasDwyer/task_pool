@@ -56,7 +56,7 @@ pub trait WorkProvider: 'static + Send + Sync {
     /// Gets a reference to the notifier which raises an event when new work is available.
     fn change_notifier(&self) -> &ChangeNotifier;
     /// Obtains the next unit of queued work from the provider.
-    fn next_task(&self) -> Option<Box<dyn WorkUnit>>;
+    fn next_task(&self) -> Option<Box<dyn '_ + WorkUnit>>;
 }
 
 /// A provider which multiplexes work units from other providers, in a fixed priority order.
@@ -84,7 +84,7 @@ impl WorkProvider for ChainedWorkProvider {
         &self.notifier
     }
 
-    fn next_task(&self) -> Option<Box<dyn WorkUnit>> {
+    fn next_task(&self) -> Option<Box<dyn '_ + WorkUnit>> {
         for entry in &self.providers {
             if let Some(task) = entry.provider.next_task() {
                 return Some(task);
@@ -111,12 +111,12 @@ struct ChainedWorkProviderEntry {
 }
 
 /// A single, atomic unit of work that one thread should process.
-pub trait WorkUnit: 'static + Send {
+pub trait WorkUnit {
     /// Executes this task on the current thread.
     fn execute(self: Box<Self>);
 }
 
-impl<F: 'static + FnOnce() + Send> WorkUnit for F {
+impl<F: FnOnce()> WorkUnit for F {
     fn execute(self: Box<Self>) {
         self();
     }
@@ -630,36 +630,77 @@ pub struct TaskQueue<B: QueueBacking> {
 }
 
 impl<B: PushPopQueueBacking> TaskQueue<B> {
+    /// Joins the pool in executing the given task. Both the current thread and the background
+    /// threads complete the task's work. Semantically, this is equivalent to calling `spawn(task).join()`,
+    /// but is more efficient by ensuring that the present thread always receives at least one work item.
+    pub fn join<T: 'static + Send + Sync>(&self, task: impl TaskCollection<T>) -> T {
+        let work = Task::new(task, self.inner.clone());
+        let next_job = work.control.collection().next_task();
+
+        self.push_control(work.control());
+
+        if let Some(job) = next_job {
+            job.execute();
+        }
+
+        work.join()
+    }
+
     /// Spawns a new task into the queue.
     pub fn spawn<T: 'static + Send + Sync>(&self, task: impl TaskCollection<T>) -> Task<T, B> {
-        unsafe {
-            let work = Task::new(task, self.inner.clone());
-            let mut queue = self.inner.inner.lock().unwrap_unchecked();
+        let work = Task::new(task, self.inner.clone());
+        self.push_control(work.control());
+        work
+    }
 
+    /// Pushes the given task control into the work queue.
+    fn push_control(&self, control: Arc<TaskControl>) {
+        unsafe {
+            let mut queue = self.inner.inner.lock().unwrap_unchecked();
+    
             if queue.queued.is_empty() {
                 self.inner.notifier.notify();
             }
-
-            queue.queued.push(work.control());
-
-            work
+    
+            queue.queued.push(control);
         }
     }
 }
 
 impl<P: Ord + Send + Sync> TaskQueue<Priority<P>> {
+    /// Joins the pool in executing the given task. Both the current thread and the background
+    /// threads complete the task's work. Semantically, this is equivalent to calling `spawn(task).join()`,
+    /// but is more efficient by ensuring that the present thread always receives at least one work item.
+    pub fn join<T: 'static + Send + Sync>(&self, priority: P, task: impl TaskCollection<T>) -> T {
+        let work = Task::new(task, self.inner.clone());
+        let next_job = work.control.collection().next_task();
+
+        self.push_control(priority, work.control());
+
+        if let Some(job) = next_job {
+            job.execute();
+        }
+
+        work.join()
+    }
+
     /// Spawns a new task into the queue, with the given priority.
     pub fn spawn<T: 'static + Send + Sync>(&self, priority: P, task: impl TaskCollection<T>) -> Task<T, Priority<P>> {
+        let work = Task::new(task, self.inner.clone());
+        self.push_control(priority, work.control());
+        work
+    }
+
+    /// Pushes the given task control into the work queue.
+    fn push_control(&self, priority: P, control: Arc<TaskControl>) {
         unsafe {
-            let work = Task::new(task, self.inner.clone());
             let mut queue = self.inner.inner.lock().unwrap_unchecked();
 
             if queue.queued.is_empty() {
                 self.inner.notifier.notify();
             }
 
-            queue.queued.inner.push(PriorityHolder(work.control()), priority);
-            work
+            queue.queued.inner.push(PriorityHolder(control), priority);
         }
     }
 }
