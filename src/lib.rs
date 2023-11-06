@@ -301,6 +301,13 @@ impl TaskPoolInner {
             self.task_counter.store(new_value, Ordering::Release);
             self.on_change.notify_all();
         }
+        else {
+            let mut new_value = old_value + 1;
+            if new_value == i32::MAX - 1 {
+                new_value = 1;
+            }
+            self.task_counter.store(new_value, Ordering::Release);
+        }
     }
 
     /// Executes the work in this pool as a background thread, repeatedly loading
