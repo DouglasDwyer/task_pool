@@ -40,6 +40,7 @@ use arc_swap::*;
 use fxhash::*;
 use priority_queue::priority_queue::*;
 use private::*;
+use std::cell::*;
 use std::collections::*;
 use std::future::*;
 use std::hash::*;
@@ -300,8 +301,7 @@ impl TaskPoolInner {
             }
             self.task_counter.store(new_value, Ordering::Release);
             self.on_change.notify_all();
-        }
-        else {
+        } else {
             let mut new_value = old_value + 1;
             if new_value == i32::MAX - 1 {
                 new_value = 1;
@@ -831,7 +831,7 @@ struct TaskQueueInner<B: QueueBacking> {
 }
 
 /// Returns a queueable task that executes a single closure one time.
-pub fn once<T: 'static + Send>(f: impl 'static + FnOnce() -> T + Send) -> impl TaskCollection<T> {
+pub fn once<T: 'static + Send>(f: impl 'static + Send + FnOnce() -> T) -> impl TaskCollection<T> {
     /// Ensures that the task's output is always treated as sync, because it won't be accessed on multiple threads.
     struct SyncWrapper<T: Send>(T);
     unsafe impl<T: Send> Sync for SyncWrapper<T> {}
@@ -874,6 +874,81 @@ pub fn once<T: 'static + Send>(f: impl 'static + FnOnce() -> T + Send) -> impl T
             result_cloned.store(Some(Arc::new(SyncWrapper(f()))));
         })),
         result,
+    }
+}
+
+/// Returns a queueable task that executes a series of closures.
+pub fn many<T: 'static + Send>(
+    f: impl IntoIterator<Item = impl 'static + Send + FnOnce() -> T>,
+) -> impl TaskCollection<Vec<T>> {
+    /// Holds the inner state for a `ManyTask`.
+    struct ManyTaskInner<T: 'static + Send, F: 'static + Send + FnOnce() -> T> {
+        /// The next task to handle.
+        next_task: AtomicU32,
+        /// The number of tasks remaining to complete.
+        remaining_tasks: AtomicU32,
+        /// The list of closures to execute.
+        tasks_to_complete: Vec<MaybeUninit<F>>,
+        /// The list that stores the results.
+        results: UnsafeCell<Vec<UnsafeCell<MaybeUninit<T>>>>,
+    }
+
+    unsafe impl<T: 'static + Send, F: 'static + Send + FnOnce() -> T> Send for ManyTaskInner<T, F> {}
+    unsafe impl<T: 'static + Send, F: 'static + Send + FnOnce() -> T> Sync for ManyTaskInner<T, F> {}
+
+    /// Represents a task that executes many closures, returning the collective result.
+    struct ManyTask<T: 'static + Send, F: 'static + Send + FnOnce() -> T> {
+        /// The inner data tracker.
+        inner: Arc<ManyTaskInner<T, F>>,
+    }
+
+    impl<T: 'static + Send, F: 'static + Send + FnOnce() -> T> TaskProvider for ManyTask<T, F> {
+        fn next_task(&self) -> Option<Box<dyn WorkUnit>> {
+            unsafe {
+                let idx = self.inner.next_task.fetch_add(1, Ordering::AcqRel) as usize;
+
+                if let Some(task) = self.inner.tasks_to_complete.get(idx) {
+                    let inner = self.inner.clone();
+                    let func = task.assume_init_read();
+                    Some(Box::new(move || {
+                        *(*inner.results.get()).get_unchecked(idx).get() = MaybeUninit::new(func());
+                        inner.remaining_tasks.fetch_sub(1, Ordering::AcqRel);
+                    }))
+                } else {
+                    None
+                }
+            }
+        }
+    }
+
+    impl<T: 'static + Send, F: 'static + Send + FnOnce() -> T> TaskCollection<Vec<T>>
+        for ManyTask<T, F>
+    {
+        fn result(&self) -> Vec<T> {
+            unsafe {
+                assert!(
+                    self.inner.remaining_tasks.swap(u32::MAX, Ordering::Acquire) == 0,
+                    "Task collection was not complete."
+                );
+                transmute(self.inner.results.get().replace(Vec::new()))
+            }
+        }
+    }
+
+    let tasks_to_complete = f.into_iter().map(MaybeUninit::new).collect::<Vec<_>>();
+    let mut results = Vec::with_capacity(tasks_to_complete.len());
+
+    for _ in 0..tasks_to_complete.len() {
+        results.push(UnsafeCell::new(MaybeUninit::uninit()));
+    }
+
+    ManyTask {
+        inner: Arc::new(ManyTaskInner {
+            next_task: AtomicU32::new(0),
+            remaining_tasks: AtomicU32::new(tasks_to_complete.len() as u32),
+            tasks_to_complete,
+            results: UnsafeCell::new(results),
+        }),
     }
 }
 
@@ -991,6 +1066,15 @@ mod tests {
                 }))
                 .await,
             2
+        );
+    }
+
+    #[test]
+    fn execute_many() {
+        let queue_a = TaskQueue::<Fifo>::default();
+        assert_eq!(
+            &[0, 3, 8, 15, 24][..],
+            &queue_a.join(many((1..=5).map(|x| move || x * x - 1)))
         );
     }
 
