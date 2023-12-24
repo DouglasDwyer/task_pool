@@ -369,36 +369,40 @@ pub trait TaskCollection<T>: TaskProvider + Sized {
 #[derive(Debug)]
 pub struct Task<T, B: QueueBacking> {
     /// The control block for this task.
-    control: Arc<TaskControl>,
+    control: ManuallyDrop<Arc<TaskControl>>,
     /// A pointer to the function which extracts the result for the task.
     result: fn(*const ()) -> T,
     /// The task queue which owns the control block.
-    backing: Arc<TaskQueueHolder<B>>,
+    backing: ManuallyDrop<Arc<TaskQueueHolder<B>>>,
 }
 
 impl<T, B: QueueBacking> Task<T, B> {
     /// Creates a new task for the given collection and backing.
     fn new<C: TaskCollection<T>>(provider: C, backing: Arc<TaskQueueHolder<B>>) -> Self {
         unsafe {
-            let control = Arc::new(TaskControl::new(provider));
+            let control = ManuallyDrop::new(Arc::new(TaskControl::new(provider)));
             let result = transmute(C::result as fn(&C) -> T);
 
             Self {
                 control,
                 result,
-                backing,
+                backing: ManuallyDrop::new(backing),
             }
         }
     }
 
     /// Gets the control block for this task.
     fn control(&self) -> Arc<TaskControl> {
-        self.control.clone()
+        (*self.control).clone()
     }
 
-    /// Cancels this task, preventing any further threads from performing its work.
-    pub fn cancel(self) {
-        self.control.cancel();
+    /// Forgets this task, allowing it to keep running while discarding the value.
+    pub fn forget(mut self) {
+        unsafe {
+            ManuallyDrop::drop(&mut self.backing);
+            ManuallyDrop::drop(&mut self.control);
+            forget(self);
+        }
     }
 
     /// Whether the task has been completed yet.
@@ -462,7 +466,7 @@ impl<T, P: Ord + Send> Task<T, Priority<P>> {
                 .unwrap_unchecked()
                 .queued
                 .inner
-                .change_priority(&PriorityHolder(self.control.clone()), priority);
+                .change_priority(&PriorityHolder(self.control()), priority);
         }
     }
 }
@@ -478,6 +482,16 @@ impl<T, B: QueueBacking> Future for Task<T, B> {
                 self.control.set_result_waker(cx.waker().clone());
                 Poll::Pending
             }
+        }
+    }
+}
+
+impl<T, B: QueueBacking> Drop for Task<T, B> {
+    fn drop(&mut self) {
+        unsafe {
+            self.control.cancel();
+            ManuallyDrop::drop(&mut self.backing);
+            ManuallyDrop::drop(&mut self.control);
         }
     }
 }
