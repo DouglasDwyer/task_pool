@@ -52,6 +52,15 @@ use std::sync::*;
 use std::task::*;
 use takecell::*;
 
+/// The synchronization implementation to use.
+mod sync_impl {
+    #[cfg(target_arch = "wasm32")]
+    pub use wasm_sync::*;
+    
+    #[cfg(not(target_arch = "wasm32"))]
+    pub use std::sync::*;
+}
+
 /// A persistent source of work for multiple threads.
 pub trait WorkProvider: 'static + Send + Sync {
     /// Gets a reference to the notifier which raises an event when new work is available.
@@ -132,7 +141,7 @@ impl<F: FnOnce()> WorkUnit for F {
 #[derive(Default)]
 pub struct ChangeNotifier {
     /// The listeners that are registered to this change notifier.
-    listeners: wasm_sync::RwLock<Vec<Weak<dyn Fn() + Send + Sync>>>,
+    listeners: sync_impl::RwLock<Vec<Weak<dyn Fn() + Send + Sync>>>,
 }
 
 impl ChangeNotifier {
@@ -192,6 +201,7 @@ impl std::fmt::Debug for ChangeNotifier {
 
 /// Manages the lifetime of a registered change notification callback. Upon drop,
 /// the associated callback will no longer be invoked.
+#[allow(dead_code)]
 pub struct ChangeNotificationListener(Arc<dyn Fn() + Send + Sync>);
 
 impl std::fmt::Debug for ChangeNotificationListener {
@@ -268,9 +278,9 @@ struct TaskPoolInner {
     /// A counter which is used to determine when new tasks become available.
     task_counter: AtomicI32,
     /// A condition variable which is notified whenever the provider has new work.
-    on_change: wasm_sync::Condvar,
+    on_change: sync_impl::Condvar,
     /// A lock utilized to ensure coherency between the task counter values that threads observe.
-    lock: wasm_sync::Mutex<()>,
+    lock: sync_impl::Mutex<()>,
 }
 
 impl TaskPoolInner {
@@ -279,8 +289,8 @@ impl TaskPoolInner {
         Self {
             work_provider: Box::new(provider),
             task_counter: AtomicI32::new(1),
-            on_change: wasm_sync::Condvar::default(),
-            lock: wasm_sync::Mutex::default(),
+            on_change: sync_impl::Condvar::default(),
+            lock: sync_impl::Mutex::default(),
         }
     }
 
@@ -579,9 +589,9 @@ impl Deref for CondvarWaker {
 #[derive(Default)]
 struct CondvarWakerInner {
     /// The lock that should be used for waiting.
-    lock: wasm_sync::Mutex<()>,
+    lock: sync_impl::Mutex<()>,
     /// The condition variable that is alerted on wake.
-    on_wake: wasm_sync::Condvar,
+    on_wake: sync_impl::Condvar,
 }
 
 /// Marks a task queue as executing events in a first-in-first-out order.
@@ -777,7 +787,7 @@ impl<B: QueueBacking> Default for TaskQueue<B> {
         Self {
             inner: Arc::new(TaskQueueHolder {
                 notifier: ChangeNotifier::default(),
-                inner: wasm_sync::Mutex::new(TaskQueueInner {
+                inner: sync_impl::Mutex::new(TaskQueueInner {
                     current: None,
                     queued: B::new(),
                 }),
@@ -832,7 +842,7 @@ struct TaskQueueHolder<B: QueueBacking> {
     /// A notifier that may be used to alert other threads to newly-available work.
     notifier: ChangeNotifier,
     /// The inner queue state.
-    inner: wasm_sync::Mutex<TaskQueueInner<B>>,
+    inner: sync_impl::Mutex<TaskQueueInner<B>>,
 }
 
 /// Maintains the current state of a task queue.

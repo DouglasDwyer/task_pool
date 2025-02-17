@@ -1,6 +1,6 @@
 [package]
 name = "task_pool"
-version = "0.1.4"
+version = "0.1.5"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/DouglasDwyer/task_pool"
@@ -10,11 +10,13 @@ Flexible abstraction for task-based composable multithreading.
 """
 
 [dependencies]
-arc-swap = "1.6.0"
-fxhash = "0.2.1"
-priority-queue = "1.3.2"
-takecell = "0.1.1"
-wasm_sync = "0.1.0"
+arc-swap = { version = "1.6.0", default-features = false }
+fxhash = { version = "0.2.1", default-features = false }
+priority-queue = { version = "2.1.2", default-features = false }
+takecell = { version = "0.1.1", default-features = false }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+wasm_sync = { version = "0.1.0", default-features = false }
 
 [dev-dependencies]
 futures-executor = "0.3.28"
